@@ -25,6 +25,7 @@ domain=wiki.kinnewig.org
 # Admin
 WIKI_ADMIN=sebastian_admin
 
+
 # =======================================
 # Preamble
 # =======================================
@@ -130,6 +131,13 @@ sudo -u www-data php maintenance/install.php --confpath="${wikipath}" --dbname="
 # =======================================
 
 cat > /etc/apache2/sites-available/mediawiki_ssl.conf <<EOF
+<VirtualHost *:80> 
+  ServerName ${domain}
+  ServerAlias www.${domain}
+
+  Redirect permanent / https://${domain}
+</VirtualHost>
+
 <IfModule mod_ssl.c>
   <VirtualHost _default_:443>
 

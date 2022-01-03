@@ -326,7 +326,7 @@ GRANT USAGE ON *.* TO '$DB_ADMIN'@'localhost' IDENTIFIED BY '$DB_PWD';
 DROP USER '$DB_ADMIN'@'localhost';
 CREATE USER '$DB_ADMIN'@'localhost' IDENTIFIED BY '$DB_PWD';
 GRANT ALL PRIVILEGES ON nextcloud.* TO $DB_ADMIN@localhost;
-EXIT
+FLUSH PRIVILEGES;
 EOF
 
 
@@ -691,28 +691,46 @@ systemctl restart apache2
 # =======================================
 
 cat > /etc/apache2/sites-available/nextcloud_ssl.conf <<EOF
+<VirtualHost *:80> 
+  ServerName ${domain}
+  ServerAlias www.${domain}
+
+  Redirect permanent / https://${domain}
+</VirtualHost>
+
 <IfModule mod_ssl.c>
   <VirtualHost _default_:443>
     ServerName ${domain}
     DocumentRoot ${ncpath}
+
     CustomLog /var/log/apache2/nc-access.log combined
     ErrorLog  /var/log/apache2/nc-error.log
+
     SSLEngine on
-    SSLCertificateFile	/etc/ssl/certs/ssl-cert-snakeoil.pem
-    SSLCertificateKeyFile /etc/ssl/private/ssl-cert-snakeoil.key
+    SSLCertificateFile ${ssl_cert}
+    SSLCertificateKeyFile ${ssl_key}
+
+    <FilesMatch \.php$>
+      SetHandler "proxy:unix:/run/php/php${PHPV}-fpm.sock|fcgi://localhost"
+    </FilesMatch>
   </VirtualHost>
+
   <Directory ${ncpath}>
     Options +FollowSymlinks
     AllowOverride All
+
     <IfModule mod_dav.c>
       Dav of
     </IfModule>
+
     LimitRequestBody 0
     SSLRenegBufferSize 10486000
   </Directory>
+
   <IfModule mod_headers.c>
     Header always set Strict-Transport-Security "max-age=15768000; includeSubDomains"
   </IfModule>
+
 </IfModule>
 EOF
 
