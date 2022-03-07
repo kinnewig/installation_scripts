@@ -31,10 +31,20 @@ DB_NAME=nextcloud
 # Nextcloud Admin User
 NCADMIN_USER=sebastian_admin
 
+# Nextcloud Datadir
+# default
+NC_DIR=/var/www/nextcloud/data
+
 # domain
-domain=cloud.kinnewig.org
+domain=$(hostname --fqdn)
 
+# Certificates - Let's Encrypt
+#ssl_cert="/etc/letsencrypt/live/${domain}/fullchain.pem"
+#ssl_key="/etc/letsencrypt/live/${domain}/privkey.pem"
 
+# Self-Signed Certificate
+ssl_cert="/etc/ssl/certs/ssl-cert-snakeoil.pem"
+ssl_key="/etc/ssl/private/ssl-cert-snakeoil.key"
 
 # =======================================
 # Preamble
@@ -48,6 +58,8 @@ set -e
   exit 1
 }
 
+echo "The current FQDN is: ${domain}"
+
 # get the password for the Nextcloud admin user
 echo "Enter a password for the Nextcloud admin user"
 NC_TEST_PWD=true
@@ -60,6 +72,8 @@ while ${NC_TEST_PWD} ; do
   if [ ${NC_PWD_1} = ${NC_PWD_2} ] ; then
     NC_TEST_PWD=false
     NCADMIN_PWD=${NC_PWD_1}
+  else
+    echo "Passwords do not match, please retype you password"
   fi
 done
 
@@ -116,6 +130,7 @@ echo "Install dependecies"
 apt-get install -yqq curl wget
 apt-get install -yqq apt-utils cron curl
 apt-get install -yqq ssl-cert # self signed snakeoil certs
+apt-get install -yqq sudo
 
 # === Samba ===
 echo "Install Samba"
@@ -126,8 +141,8 @@ echo "Install PHP${PHPV}"
 
 # get latest php
 apt-get install -yqq lsb-release ca-certificates apt-transport-https software-properties-common gnupg2
-echo "deb https://packages.sury.org/php/ $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/sury-php.list
-wget -qO - https://packages.sury.org/php/apt.gpg | sudo apt-key add -
+echo "deb https://packages.sury.org/php/ $(lsb_release -sc) main" | tee /etc/apt/sources.list.d/sury-php.list
+wget -qO - https://packages.sury.org/php/apt.gpg | apt-key add -
 
 apt-get update
 apt-get install -yqq php${PHPV}
@@ -159,7 +174,9 @@ apt-get install -yqq php${PHPV}-cli php${PHPV}-fpm php${PHPV}-opcache
 # apt-get install -yqq php${PHPV}-german
 
 # For preview generation
-apt-get install -yqq php${PHPV}-imagick ffmpeg
+apt-get install -yqq php${PHPV}-imagick ffmpeg 
+  # svg support for imagick 
+  apt-get install -yqq libmagickcore-6.q16-6-extra
 
 
 # === Install and configure Apache2 ===
@@ -215,7 +232,7 @@ a2enconf http2
 # enable php-fpm
 systemctl start php${PHPV}-fpm
 systemctl enable php${PHPV}-fpm
-sudo a2dismod php${PHPV}
+a2dismod php${PHPV}
 a2enconf php${PHPV}-fpm
 a2enmod proxy_fcgi setenvif
 
@@ -409,7 +426,8 @@ chown -R www-data:www-data $ncpath
 # install nextcloud
 sudo -u www-data php occ  maintenance:install --database \
   "mysql" --database-name "$DB_NAME"  --database-user "$DB_ADMIN" --database-pass \
-  "$DB_PWD" --admin-user "$NCADMIN_USER" --admin-pass "$NCADMIN_PWD"
+  "$DB_PWD" --admin-user "$NCADMIN_USER" --admin-pass "$NCADMIN_PWD" \
+  --data-dir "$NC_DIR"
 
 # background job
 sudo -u www-data php occ background:cron
@@ -452,6 +470,9 @@ sed -i "s|^;\?sys_temp_dir =.*$|sys_temp_dir = $ncpath/data/tmp|"     /etc/php/$
 # Set time zone
 sudo -u www-data php occ config:system:set logtimezone --value="Europe/Berlin"
 
+# default phone region
+sudo -u www-data php occ config:system:set default_phone_region --value="DE"
+
 # 4 Byte UTF8 support
 sudo -u www-data php occ config:system:set mysql.utf8mb4 --type boolean --value="true"
 
@@ -470,6 +491,7 @@ sudo -u www-data php occ config:system:set mail_domain       --value="${domain}"
 # https
 sudo -u www-data php occ config:system:set overwriteprotocol --value=https
 sudo -u www-data php occ config:system:set overwrite.cli.url --value="${domain}"
+
 
 # bash auto completion
 apt-get install -yqq bash-completion
@@ -513,9 +535,6 @@ sudo -u www-data php occ app:install richdocuments
 # Collabora Online - Built-in CODE Server
 sudo -u www-data php -d memory_limit=512M occ app:install richdocumentscode
 
-# === keepass ===
-sudo -u www-data php occ app:install keeweb
-
 # === Preview generator ===
 sudo -u www-data php occ app:install previewgenerator
 
@@ -530,11 +549,6 @@ sudo -u www-data php occ config:app:set preview jpeg_quality --value="60"
 
 # run the preview generator once
 sudo -u www-data php occ preview:generate-all
-
-# set cron job (runs the preview generator every night 4:00 o'clock)
-echo "0 4 * * * /usr/bin/php -f /var/www/nextcloud/occ preview:pre-generate" > /tmp/crontab_http
-crontab -u www-data /tmp/crontab_http
-rm /tmp/crontab_http
 
 # === Enable external storage ===
 sudo -u www-data php occ app:enable files_external 
@@ -737,8 +751,31 @@ EOF
 a2ensite nextcloud_ssl
 systemctl reload apache2
 
-# set cron job
-echo "*/5  *  *  *  * php -f /var/www/nextcloud/cron.php" > /tmp/crontab_http
+# create bash script that runs all cleaning jobs
+cat > /var/www/nextcloud/cron_clean.sh <<EOF
+# rescan the files
+php -f /var/www/nextcloud/occ files:scan
+
+# scan the database for missing indices
+php -f /var/www/nextcloud/occ db:add-missing-indices
+
+# clean the filesystem
+php -f /var/www/nextcloud/occ files:cleanup
+
+# run the preview generator
+php -f /var/www/nextcloud/occ preview:pre-generate
+EOF
+
+echo "Create Cron Jobs:"
+# set cron job for Nextcloud (run every 5 minutes)
+echo "  create cron job for Nextcloud"
+echo "*/5  *  *  *  * php -f /var/www/nextcloud/cron.php" >> /tmp/crontab_http
+
+# rescan files, scan database for missing indices, clean filesystem and run the previewgenerator
+echo "  create cron job to rescan files, scan database for missing indices, clean filesystem and run the previewgenerator"
+echo "0 2 * * * bash /var/www/nextcloud/cron_clean.sh" >> /tmp/crontab_http
+
+# Now enable all the cron jobs
 crontab -u www-data /tmp/crontab_http
 rm /tmp/crontab_http
 
